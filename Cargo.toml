@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "typhoon",
+    "typhoon-exe",
+]
