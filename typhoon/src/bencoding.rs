@@ -1,7 +1,7 @@
 extern crate nom;
 use nom::{
     branch::alt,
-    bytes::complete::take_while1,
+    bytes::complete::{take, take_while1},
     character::{complete::char, is_digit},
     combinator::{map, map_res},
     sequence::{preceded, terminated},
@@ -95,7 +95,16 @@ fn bencoding(input: &[u8]) -> IResult<&[u8], Bencoding> {
         map(wrapped, Bencoding::Int)(input)
     }
 
-    int(input)
+    fn bytestring(input: &[u8]) -> IResult<&[u8], Bencoding> {
+        // This count is always positive
+        let (input, count) = terminated(int_digits, char(':'))(input)?;
+        let ucount = count as usize;
+        let (input, slice) = take(ucount)(input)?;
+        let boxed = slice.to_vec().into_boxed_slice();
+        Ok((input, Bencoding::ByteString(boxed)))
+    }
+
+    alt((int, bytestring))(input)
 }
 
 #[cfg(test)]
@@ -114,5 +123,16 @@ mod test {
         let input = b"i-111e";
         let output = Bencoding::parse(input);
         assert_eq!(Ok(Bencoding::Int(-111)), output);
+    }
+
+    #[test]
+    fn parsing_basic_strings_works() {
+        let input = b"4:AAAA";
+        let output = Bencoding::parse(input);
+        let string = b"AAAA".to_vec().into_boxed_slice();
+        assert_eq!(
+            Ok(Bencoding::ByteString(string)),
+            output
+        );
     }
 }
