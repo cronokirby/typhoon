@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::str;
 
 /// Represents an error that occurs while parsing bencoded data.
 ///
@@ -51,7 +50,7 @@ pub enum Bencoding {
 pub type BencodingResult = Result<Bencoding, BencodingError>;
 
 impl Bencoding {
-    fn parse(input: &[u8]) -> BencodingResult {
+    pub fn parse(input: &[u8]) -> BencodingResult {
         fn int_digits(lexer: &mut Lexer) -> Result<i64, BencodingError> {
             let head = *lexer.next().ok_or(BencodingError(
                 "Tried to parse integer from empty input".to_owned(),
