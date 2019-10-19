@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt, str};
 
 /// Represents an error that occurs while parsing bencoded data.
 ///
@@ -46,6 +46,45 @@ pub enum Bencoding {
     /// The keys of this map are subject to the same caveats as byte sequence elements in this
     /// enum. In practice though, non UTF-8 map keys don't seem to appear.
     Dict(HashMap<Box<[u8]>, Bencoding>),
+}
+
+impl fmt::Display for Bencoding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn fmt_bytestring(string: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match str::from_utf8(string) {
+                Ok(s) => write!(f, "\"{}\"", s),
+                Err(_) => {
+                    for b in string {
+                        write!(f, "{:x}", b)?;
+                    }
+                    Ok(())
+                }
+            }
+        }
+
+        match self {
+            Bencoding::Int(i) => write!(f, "{}", i),
+            Bencoding::ByteString(b) => fmt_bytestring(&b, f),
+            Bencoding::List(items) => {
+                write!(f, "[")?;
+                for item in items.iter() {
+                    item.fmt(f)?;
+                    write!(f, ", ")?;
+                }
+                write!(f, "]")
+            }
+            Bencoding::Dict(map) => {
+                write!(f, "{{")?;
+                for (key, value) in map.iter() {
+                    fmt_bytestring(&key, f)?;
+                    write!(f, ": ")?;
+                    value.fmt(f)?;
+                    write!(f, ", ")?;
+                }
+                write!(f, "}}")
+            }
+        }
+    }
 }
 
 /// A type synonym for the result of parsing bencoded data.
