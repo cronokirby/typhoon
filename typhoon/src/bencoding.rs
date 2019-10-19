@@ -1,13 +1,3 @@
-extern crate nom;
-use nom::{
-    branch::alt,
-    bytes::complete::{take, take_while1},
-    character::{complete::char, is_digit},
-    combinator::{map, map_res},
-    sequence::{preceded, terminated},
-    IResult,
-};
-
 use std::collections::HashMap;
 use std::str;
 
@@ -18,7 +8,7 @@ use std::str;
 /// manually inspecting errors to figure out how exactly things failed, or if
 /// we could re run the parser on the data with invalid UTF-8 sections stripped.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct BencodingError(String);
+pub struct BencodingError(String);
 
 /// Represents a general data structure expressable with "bencoding"
 ///
@@ -57,59 +47,155 @@ pub enum Bencoding {
     Dict(HashMap<Box<[u8]>, Bencoding>),
 }
 
+/// A type synonym for the result of parsing bencoded data.
+pub type BencodingResult = Result<Bencoding, BencodingError>;
+
 impl Bencoding {
-    fn parse(input: &[u8]) -> Result<Bencoding, BencodingError> {
-        match bencoding(input) {
-            Ok((_, res)) => Ok(res),
-            Err(e) => {
-                let msg = match e {
-                    nom::Err::Error((raw, kind)) | nom::Err::Failure((raw, kind)) => {
-                        let lossy = String::from_utf8_lossy(raw);
-                        format!("lossy: {}, raw: {:?}, kind: {:?}", lossy, raw, kind)
+    fn parse(input: &[u8]) -> BencodingResult {
+        fn int_digits(lexer: &mut Lexer) -> Result<i64, BencodingError> {
+            let head = *lexer.next().ok_or(BencodingError(
+                "Tried to parse integer from empty input".to_owned(),
+            ))?;
+            let mut acc = as_digit(head).ok_or(BencodingError(
+                "Tried to parse integer without any valid digits".to_owned(),
+            ))?;
+            while let Some(&chr) = lexer.peek() {
+                match as_digit(chr) {
+                    None => break,
+                    Some(digit) => {
+                        lexer.next();
+                        acc = 10 * acc + digit;
                     }
-                    other => format!("{:?}", other),
-                };
-                Err(BencodingError(msg))
+                }
+            }
+            Ok(acc)
+        }
+
+        fn int(lexer: &mut Lexer) -> BencodingResult {
+            let negate = if let Some(b'-') = lexer.peek() {
+                lexer.next();
+                -1
+            } else {
+                1
+            };
+            let int = int_digits(lexer)?;
+            lexer.expect(b'e')?;
+            Ok(Bencoding::Int(negate * int))
+        }
+
+        fn bytestring(lexer: &mut Lexer) -> BencodingResult {
+            let count = int_digits(lexer)? as usize;
+            lexer.expect(b':')?;
+            let slice = lexer.take(count).ok_or(BencodingError(format!(
+                "Unable to take {} bytes from input",
+                count
+            )))?;
+            Ok(Bencoding::ByteString(slice.to_vec().into_boxed_slice()))
+        }
+
+        fn list(lexer: &mut Lexer) -> BencodingResult {
+            let mut inner = Vec::new();
+            while let Ok(item) = root(lexer) {
+                inner.push(item);
+            }
+            lexer.expect(b'e')?;
+            Ok(Bencoding::List(inner.into_boxed_slice()))
+        }
+
+        fn root(lexer: &mut Lexer) -> BencodingResult {
+            match lexer.peek() {
+                None => Err(BencodingError(
+                    "Tried to parse bencoded data from empty input".to_owned(),
+                )),
+                Some(b'i') => {
+                    lexer.next();
+                    int(lexer)
+                }
+                Some(b'l') => {
+                    lexer.next();
+                    list(lexer)
+                }
+                Some(&c) if as_digit(c).is_some() => bytestring(lexer),
+                Some(c) => Err(BencodingError(format!("Unknown type of element {}", c))),
             }
         }
+
+        let mut lexer = Lexer::new(input);
+        root(&mut lexer)
     }
 }
 
-fn bencoding(input: &[u8]) -> IResult<&[u8], Bencoding> {
-    // The return value of this function is always positive
-    fn int_digits(input: &[u8]) -> IResult<&[u8], i64> {
-        let digits = take_while1(is_digit);
-        // We don't need to check, since we've parse only ASCII digits
-        let get_str = map(digits, |bytes| unsafe { str::from_utf8_unchecked(bytes) });
-        // This shouldn't ever fail, once again because of the ASCII digits
-        map_res(get_str, |string| i64::from_str_radix(string, 10))(input)
+#[derive(Debug)]
+struct Lexer<'a> {
+    input: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Lexer<'a> {
+    #[inline]
+    fn new(input: &'a [u8]) -> Self {
+        Lexer { input, pos: 0 }
     }
 
-    fn signed_int(input: &[u8]) -> IResult<&[u8], i64> {
-        let negative = map(preceded(char('-'), int_digits), |i| -i);
-        alt((negative, int_digits))(input)
+    #[inline]
+    fn next(&mut self) -> Option<&'a u8> {
+        let ret = self.input.get(self.pos);
+        self.pos += 1;
+        ret
     }
 
-    fn int(input: &[u8]) -> IResult<&[u8], Bencoding> {
-        let wrapped = terminated(preceded(char('i'), signed_int), char('e'));
-        map(wrapped, Bencoding::Int)(input)
+    #[inline]
+    fn peek(&mut self) -> Option<&'a u8> {
+        self.input.get(self.pos)
     }
 
-    fn bytestring(input: &[u8]) -> IResult<&[u8], Bencoding> {
-        // This count is always positive
-        let (input, count) = terminated(int_digits, char(':'))(input)?;
-        let ucount = count as usize;
-        let (input, slice) = take(ucount)(input)?;
-        let boxed = slice.to_vec().into_boxed_slice();
-        Ok((input, Bencoding::ByteString(boxed)))
+    #[inline]
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+        let top = self.pos + count;
+        if top > self.input.len() {
+            None
+        } else {
+            let slice = &self.input[self.pos..top];
+            self.pos = top;
+            Some(slice)
+        }
     }
 
-    alt((int, bytestring))(input)
+    #[inline]
+    fn expect(&mut self, target: u8) -> Result<(), BencodingError> {
+        match self.peek() {
+            Some(&good) if good == target => {
+                self.next();
+                Ok(())
+            }
+            Some(bad) => Err(BencodingError(format!(
+                "Expected {} but found {}",
+                target, bad
+            ))),
+            None => Err(BencodingError(format!(
+                "Expected {} but reached the end of input",
+                target
+            ))),
+        }
+    }
+}
+// Check that an ASCII character is between '0' and '9'
+fn as_digit(chr: u8) -> Option<i64> {
+    if b'0' <= chr && chr <= b'9' {
+        Some(chr as i64 - 48)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use super::Bencoding;
+    use super::{as_digit, Bencoding};
+
+    #[test]
+    fn as_digit_test() {
+        assert_eq!(Some(1), as_digit(b'1'))
+    }
 
     #[test]
     fn parsing_positive_integers_works() {
@@ -130,9 +216,18 @@ mod test {
         let input = b"4:AAAA";
         let output = Bencoding::parse(input);
         let string = b"AAAA".to_vec().into_boxed_slice();
-        assert_eq!(
-            Ok(Bencoding::ByteString(string)),
-            output
-        );
+        assert_eq!(Ok(Bencoding::ByteString(string)), output);
+    }
+
+    #[test]
+    fn parsing_basic_lists_works() {
+        let input = b"li1ei2ei3ee";
+        let output = Bencoding::parse(input);
+        let expected = Bencoding::List(Box::new([
+            Bencoding::Int(1),
+            Bencoding::Int(2),
+            Bencoding::Int(3),
+        ]));
+        assert_eq!(Ok(expected), output);
     }
 }
