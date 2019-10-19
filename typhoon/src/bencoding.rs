@@ -52,12 +52,13 @@ pub type BencodingResult = Result<Bencoding, BencodingError>;
 impl Bencoding {
     pub fn parse(input: &[u8]) -> BencodingResult {
         fn int_digits(lexer: &mut Lexer) -> Result<i64, BencodingError> {
-            let head = *lexer.next().ok_or(BencodingError(
+            let head = *lexer.peek().ok_or(BencodingError(
                 "Tried to parse integer from empty input".to_owned(),
             ))?;
             let mut acc = as_digit(head).ok_or(BencodingError(
                 "Tried to parse integer without any valid digits".to_owned(),
             ))?;
+            lexer.next();
             while let Some(&chr) = lexer.peek() {
                 match as_digit(chr) {
                     None => break,
@@ -82,14 +83,14 @@ impl Bencoding {
             Ok(Bencoding::Int(negate * int))
         }
 
-        fn bytestring(lexer: &mut Lexer) -> BencodingResult {
+        fn bytestring(lexer: &mut Lexer) -> Result<Box<[u8]>, BencodingError> {
             let count = int_digits(lexer)? as usize;
             lexer.expect(b':')?;
             let slice = lexer.take(count).ok_or(BencodingError(format!(
                 "Unable to take {} bytes from input",
                 count
             )))?;
-            Ok(Bencoding::ByteString(slice.to_vec().into_boxed_slice()))
+            Ok(slice.to_vec().into_boxed_slice())
         }
 
         fn list(lexer: &mut Lexer) -> BencodingResult {
@@ -99,6 +100,16 @@ impl Bencoding {
             }
             lexer.expect(b'e')?;
             Ok(Bencoding::List(inner.into_boxed_slice()))
+        }
+
+        fn dict(lexer: &mut Lexer) -> BencodingResult {
+            let mut inner = HashMap::new();
+            while let Ok(key) = bytestring(lexer) {
+                let item = root(lexer)?;
+                inner.insert(key, item);
+            }
+            lexer.expect(b'e')?;
+            Ok(Bencoding::Dict(inner))
         }
 
         fn root(lexer: &mut Lexer) -> BencodingResult {
@@ -114,7 +125,11 @@ impl Bencoding {
                     lexer.next();
                     list(lexer)
                 }
-                Some(&c) if as_digit(c).is_some() => bytestring(lexer),
+                Some(b'd') => {
+                    lexer.next();
+                    dict(lexer)
+                }
+                Some(&c) if as_digit(c).is_some() => bytestring(lexer).map(Bencoding::ByteString),
                 Some(c) => Err(BencodingError(format!("Unknown type of element {}", c))),
             }
         }
@@ -189,6 +204,8 @@ fn as_digit(chr: u8) -> Option<i64> {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
+
     use super::{as_digit, Bencoding};
 
     #[test]
@@ -227,6 +244,17 @@ mod test {
             Bencoding::Int(2),
             Bencoding::Int(3),
         ]));
+        assert_eq!(Ok(expected), output);
+    }
+
+    #[test]
+    fn parsing_basic_dicts_works() {
+        let input = b"d1:Ai1e1:Bi2ee";
+        let output = Bencoding::parse(input);
+        let mut map = HashMap::new();
+        map.insert(b"A".to_vec().into_boxed_slice(), Bencoding::Int(1));
+        map.insert(b"B".to_vec().into_boxed_slice(), Bencoding::Int(2));
+        let expected = Bencoding::Dict(map);
         assert_eq!(Ok(expected), output);
     }
 }
