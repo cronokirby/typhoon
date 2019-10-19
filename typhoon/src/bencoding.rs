@@ -55,7 +55,7 @@ impl fmt::Display for Bencoding {
                 Ok(s) => write!(f, "\"{}\"", s),
                 Err(_) => {
                     for b in string {
-                        write!(f, "{:x}", b)?;
+                        write!(f, "{:X}", b)?;
                     }
                     Ok(())
                 }
