@@ -3,9 +3,11 @@ use std::collections::HashMap;
 /// Represents an error that occurs while parsing bencoded data.
 ///
 /// For now, this isn't very useful, and just contains a formatted string
-/// produced by our parsing framework. We could produce more useful input by
-/// manually inspecting errors to figure out how exactly things failed, or if
-/// we could re run the parser on the data with invalid UTF-8 sections stripped.
+/// produced by our parsing functions. This could be extended into a richer
+/// enum for each of the different points of failure, along with context.
+///
+/// This is a fine enough solution since this is usually just presented to the user
+/// directly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BencodingError(String);
 
@@ -50,7 +52,8 @@ pub enum Bencoding {
 pub type BencodingResult = Result<Bencoding, BencodingError>;
 
 impl Bencoding {
-    pub fn parse(input: &[u8]) -> BencodingResult {
+    /// Try and decode a sequence of bytes as bencoded data.
+    pub fn decode(input: &[u8]) -> BencodingResult {
         fn int_digits(lexer: &mut Lexer) -> Result<i64, BencodingError> {
             let head = *lexer.peek().ok_or(BencodingError(
                 "Tried to parse integer from empty input".to_owned(),
@@ -193,6 +196,7 @@ impl<'a> Lexer<'a> {
         }
     }
 }
+
 // Check that an ASCII character is between '0' and '9'
 fn as_digit(chr: u8) -> Option<i64> {
     if b'0' <= chr && chr <= b'9' {
@@ -216,21 +220,21 @@ mod test {
     #[test]
     fn parsing_positive_integers_works() {
         let input = b"i123e";
-        let output = Bencoding::parse(input);
+        let output = Bencoding::decode(input);
         assert_eq!(Ok(Bencoding::Int(123)), output);
     }
 
     #[test]
     fn parsing_negative_integers_works() {
         let input = b"i-111e";
-        let output = Bencoding::parse(input);
+        let output = Bencoding::decode(input);
         assert_eq!(Ok(Bencoding::Int(-111)), output);
     }
 
     #[test]
     fn parsing_basic_strings_works() {
         let input = b"4:AAAA";
-        let output = Bencoding::parse(input);
+        let output = Bencoding::decode(input);
         let string = b"AAAA".to_vec().into_boxed_slice();
         assert_eq!(Ok(Bencoding::ByteString(string)), output);
     }
@@ -238,7 +242,7 @@ mod test {
     #[test]
     fn parsing_basic_lists_works() {
         let input = b"li1ei2ei3ee";
-        let output = Bencoding::parse(input);
+        let output = Bencoding::decode(input);
         let expected = Bencoding::List(Box::new([
             Bencoding::Int(1),
             Bencoding::Int(2),
@@ -250,7 +254,7 @@ mod test {
     #[test]
     fn parsing_basic_dicts_works() {
         let input = b"d1:Ai1e1:Bi2ee";
-        let output = Bencoding::parse(input);
+        let output = Bencoding::decode(input);
         let mut map = HashMap::new();
         map.insert(b"A".to_vec().into_boxed_slice(), Bencoding::Int(1));
         map.insert(b"B".to_vec().into_boxed_slice(), Bencoding::Int(2));
