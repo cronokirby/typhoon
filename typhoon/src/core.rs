@@ -2,7 +2,9 @@
 //!
 //! This includes definitions of things like piece hashes, peers, as well
 //! as what's included in a `.torrent` file, for example.
-use std::{path::PathBuf, time::SystemTime};
+use std::{convert::TryFrom, path::PathBuf, time::SystemTime};
+
+pub enum TryFromBencodingError {}
 
 /// Represents the location of some tracker.
 ///
@@ -12,19 +14,37 @@ use std::{path::PathBuf, time::SystemTime};
 ///
 /// Addresses are kept as strings, because they often require some kind of DNS
 /// resolution, e.g. "tracker.leechers-paradise.org:6969".
+#[derive(Clone, Debug, PartialEq)]
 pub enum TrackerAddr {
     /// An address of a tracker that speaks the UDP protocol.
     ///
     /// The UDP based tracker protocol is quite a bit more common, since it's more
     /// efficient than the HTTP based protocol.
     UDP(String),
-    /// An
+    /// An HTTP or HTTPS based tracker.
+    ///
+    /// This variant will include the protocol qualified url (e.g. "https://tracker.com:4040").
+    /// We include this to be able to let our HTTP client distinguish between the two protocols.
     HTTP(String),
     /// This covers other protocols we don't support or recognize.
     ///
     /// The main protocol included in here is websocket trackers, used
     /// to allow torrents on the web.
     Unknown(String),
+}
+
+impl From<&str> for TrackerAddr {
+    fn from(string: &str) -> Self {
+        let maybe_udp = string.splitn(2, "udp://").skip(1).next();
+        if let Some(udp) = maybe_udp {
+            return TrackerAddr::UDP(udp.to_owned());
+        }
+        if string.starts_with("http://") || string.starts_with("https://") {
+            // We include the entire string, because http clients like having the URL
+            return TrackerAddr::HTTP(string.to_owned());
+        }
+        return TrackerAddr::Unknown(string.to_owned());
+    }
 }
 
 /// Represents the SHA1 hash of a given piece.
@@ -94,4 +114,16 @@ pub struct Torrent {
     /// This means that a piece can overlap an arbitrary number of files, and that the final
     /// piece may be a different length than the others.
     pub files: Box<[FileInfo]>,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn parsing_udp_trackers_works() {
+        let tracker_string = "udp://tracker.leechers-paradise.org:6969";
+        let expected = TrackerAddr::UDP("tracker.leechers-paradise.org:6969".to_owned());
+        assert_eq!(expected, TrackerAddr::from(tracker_string));
+    }
 }
