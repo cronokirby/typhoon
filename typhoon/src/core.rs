@@ -2,9 +2,51 @@
 //!
 //! This includes definitions of things like piece hashes, peers, as well
 //! as what's included in a `.torrent` file, for example.
-use std::{convert::TryFrom, path::PathBuf, time::SystemTime};
+use crate::bencoding::Bencoding;
+use std::{convert::TryFrom, path::PathBuf, str, time::SystemTime};
 
-pub enum TryFromBencodingError {}
+pub enum TryFromBencodingError<'b> {
+    ExpectedInt(&'b Bencoding),
+    ExpectedByteString(&'b Bencoding),
+    ExpectedList(&'b Bencoding),
+    ExpectedDict(&'b Bencoding),
+    NotUTF8 {
+        bencoding: &'b Bencoding,
+        error: str::Utf8Error,
+    },
+    MissingKey {
+        bencoding: &'b Bencoding,
+        key: &'static [u8],
+    },
+}
+
+impl<'b> TryFromBencodingError<'b> {
+    fn from_utf8_error(bencoding: &'b Bencoding, error: str::Utf8Error) -> Self {
+        TryFromBencodingError::NotUTF8 { bencoding, error }
+    }
+}
+
+#[inline]
+fn extract_int<'b>(bencoding: &'b Bencoding) -> Result<i64, TryFromBencodingError<'b>> {
+    match bencoding {
+        &Bencoding::Int(i) => Ok(i),
+        _ => Err(TryFromBencodingError::ExpectedInt(bencoding)),
+    }
+}
+
+#[inline]
+fn extract_bytes<'b>(bencoding: &'b Bencoding) -> Result<&'b [u8], TryFromBencodingError<'b>> {
+    match bencoding {
+        Bencoding::ByteString(bx) => Ok(bx),
+        _ => Err(TryFromBencodingError::ExpectedByteString(bencoding)),
+    }
+}
+
+#[inline]
+fn extract_string<'b>(bencoding: &'b Bencoding) -> Result<&'b str, TryFromBencodingError<'b>> {
+    let bytes = extract_bytes(bencoding)?;
+    str::from_utf8(bytes).map_err(|e| TryFromBencodingError::from_utf8_error(bencoding, e))
+}
 
 /// Represents the location of some tracker.
 ///
@@ -44,6 +86,14 @@ impl From<&str> for TrackerAddr {
             return TrackerAddr::HTTP(string.to_owned());
         }
         return TrackerAddr::Unknown(string.to_owned());
+    }
+}
+
+impl<'b> TryFrom<&'b Bencoding> for TrackerAddr {
+    type Error = TryFromBencodingError<'b>;
+
+    fn try_from(bencoding: &'b Bencoding) -> Result<Self, Self::Error> {
+        extract_string(bencoding).map(Self::from)
     }
 }
 
@@ -121,9 +171,16 @@ mod test {
     use super::*;
 
     #[test]
-    fn parsing_udp_trackers_works() {
+    fn parsing_udp_tracker_addrs() {
         let tracker_string = "udp://tracker.leechers-paradise.org:6969";
         let expected = TrackerAddr::UDP("tracker.leechers-paradise.org:6969".to_owned());
+        assert_eq!(expected, TrackerAddr::from(tracker_string));
+    }
+
+    #[test]
+    fn parsing_http_tracker_addrs() {
+        let tracker_string = "http://tracker.leechers-paradise.org:6969";
+        let expected = TrackerAddr::HTTP("http://tracker.leechers-paradise.org:6969".to_owned());
         assert_eq!(expected, TrackerAddr::from(tracker_string));
     }
 }
