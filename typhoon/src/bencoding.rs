@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, str};
+use std::{collections::HashMap, convert, error, fmt, str};
 
 /// Represents an error that occurs while parsing bencoded data.
 ///
@@ -10,6 +10,14 @@ use std::{collections::HashMap, fmt, str};
 /// directly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BencodingError(String);
+
+impl error::Error for BencodingError {}
+
+impl fmt::Display for BencodingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
 
 /// Represents a general data structure expressable with "bencoding"
 ///
@@ -87,8 +95,8 @@ impl fmt::Display for Bencoding {
     }
 }
 
-/// A type synonym for the result of parsing bencoded data.
-pub type BencodingResult = Result<Bencoding, BencodingError>;
+// A type synonym for the result of parsing bencoded data.
+type BencodingResult = Result<Bencoding, BencodingError>;
 
 impl Bencoding {
     /// Try and decode a sequence of bytes as bencoded data.
@@ -178,6 +186,14 @@ impl Bencoding {
 
         let mut lexer = Lexer::new(input);
         root(&mut lexer)
+    }
+}
+
+impl convert::TryFrom<&[u8]> for Bencoding {
+    type Error = BencodingError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Bencoding::decode(bytes)
     }
 }
 
