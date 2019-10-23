@@ -218,23 +218,69 @@ impl<'b> TryFrom<&'b Bencoding> for Torrent {
     type Error = ParseTorrentError<'b>;
 
     fn try_from(bencoding: &'b Bencoding) -> Result<Self, Self::Error> {
-        let trackers = match extract_key(bencoding, b"announce-list") {
-            Err(_) => {
-                let tracker = TrackerAddr::try_from(bencoding)?;
-                vec![(0, tracker)].into_boxed_slice()
-            }
-            Ok(inner) => {
-                let tiers = extract_list(inner)?;
-                let mut trackers = Vec::with_capacity(tiers.len());
-                for (index, tier) in tiers.iter().enumerate() {
-                    let tier_list = extract_list(tier)?;
-                    for tracker in tier_list {
-                        trackers.push((index as u8, TrackerAddr::try_from(tracker)?))
-                    }
+        fn extract_trackers(
+            bencoding: &Bencoding,
+        ) -> Result<Box<[(u8, TrackerAddr)]>, ParseTorrentError<'_>> {
+            match extract_key(bencoding, b"announce-list") {
+                Err(_) => {
+                    let tracker = TrackerAddr::try_from(bencoding)?;
+                    Ok(vec![(0, tracker)].into_boxed_slice())
                 }
-                trackers.into_boxed_slice()
+                Ok(inner) => {
+                    let tiers = extract_list(inner)?;
+                    let mut trackers = Vec::with_capacity(tiers.len());
+                    for (index, tier) in tiers.iter().enumerate() {
+                        let tier_list = extract_list(tier)?;
+                        for tracker in tier_list {
+                            trackers.push((index as u8, TrackerAddr::try_from(tracker)?))
+                        }
+                    }
+                    Ok(trackers.into_boxed_slice())
+                }
             }
-        };
+        }
+
+        fn extract_piece_hashes(
+            info: &Bencoding,
+        ) -> Result<Box<[PieceHash]>, ParseTorrentError<'_>> {
+            let piece_bytes = extract_bytes(extract_key(info, b"pieces")?)?;
+            let piece_bytes_len = piece_bytes.len();
+            if piece_bytes_len % PIECE_HASH_SIZE != 0 {
+                return Err(ParseTorrentError::BadHashLength(piece_bytes_len));
+            }
+            let mut piece_hashes = Vec::with_capacity(piece_bytes_len / PIECE_HASH_SIZE);
+            for chunk in piece_bytes.chunks_exact(PIECE_HASH_SIZE) {
+                let mut arr: [u8; PIECE_HASH_SIZE] = Default::default();
+                arr.copy_from_slice(chunk);
+                piece_hashes.push(PieceHash(arr));
+            }
+            Ok(piece_hashes.into_boxed_slice())
+        }
+
+        fn extract_files(info: &Bencoding) -> Result<Box<[FileInfo]>, ParseTorrentError<'_>> {
+            match extract_key(info, b"files") {
+                Err(_) => {
+                    let name: PathBuf = extract_string(extract_key(info, b"name")?)?.into();
+                    let length = extract_int(extract_key(info, b"length")?)? as usize;
+                    Ok(vec![FileInfo { name, length }].into_boxed_slice())
+                }
+                Ok(inner) => {
+                    let dir: PathBuf = extract_string(extract_key(info, b"name")?)?.into();
+                    let files = extract_list(inner)?;
+                    let mut file_infos = Vec::with_capacity(files.len());
+                    for file in files {
+                        let mut name = dir.clone();
+                        let length = extract_int(extract_key(file, b"length")?)? as usize;
+                        let path: PathBuf = extract_string(extract_key(file, b"path")?)?.into();
+                        name.push(path);
+                        file_infos.push(FileInfo { name, length });
+                    }
+                    Ok(file_infos.into_boxed_slice())
+                }
+            }
+        }
+
+        let trackers = extract_trackers(bencoding)?;
         let creation = extract_key(bencoding, b"creation date")
             .ok()
             .map(extract_system_time)
@@ -254,38 +300,8 @@ impl<'b> TryFrom<&'b Bencoding> for Torrent {
             .transpose()?;
         let private = private_option.map(|x| x == 1).unwrap_or(false);
         let piece_length = extract_int(extract_key(info, b"piece length")?)? as usize;
-        let piece_bytes = extract_bytes(extract_key(info, b"pieces")?)?;
-        let piece_bytes_len = piece_bytes.len();
-        if piece_bytes_len % PIECE_HASH_SIZE != 0 {
-            return Err(ParseTorrentError::BadHashLength(piece_bytes_len));
-        }
-        let mut piece_hashes = Vec::with_capacity(piece_bytes_len / PIECE_HASH_SIZE);
-        for chunk in piece_bytes.chunks_exact(PIECE_HASH_SIZE) {
-            let mut arr: [u8; PIECE_HASH_SIZE] = Default::default();
-            arr.copy_from_slice(chunk);
-            piece_hashes.push(PieceHash(arr));
-        }
-        let piece_hashes = piece_hashes.into_boxed_slice();
-        let files = match extract_key(info, b"files") {
-            Err(_) => {
-                let name: PathBuf = extract_string(extract_key(info, b"name")?)?.into();
-                let length = extract_int(extract_key(info, b"length")?)? as usize;
-                vec![FileInfo { name, length }].into_boxed_slice()
-            }
-            Ok(inner) => {
-                let dir: PathBuf = extract_string(extract_key(info, b"name")?)?.into();
-                let files = extract_list(inner)?;
-                let mut file_infos = Vec::with_capacity(files.len());
-                for file in files {
-                    let mut name = dir.clone();
-                    let length = extract_int(extract_key(file, b"length")?)? as usize;
-                    let path: PathBuf = extract_string(extract_key(file, b"path")?)?.into();
-                    name.push(path);
-                    file_infos.push(FileInfo { name, length });
-                }
-                file_infos.into_boxed_slice()
-            }
-        };
+        let piece_hashes = extract_piece_hashes(info)?;
+        let files = extract_files(info)?;
         Ok(Torrent {
             trackers,
             creation,
