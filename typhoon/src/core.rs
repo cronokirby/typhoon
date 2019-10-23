@@ -229,7 +229,7 @@ impl<'b> TryFrom<&'b Bencoding> for Torrent {
                 for (index, tier) in tiers.iter().enumerate() {
                     let tier_list = extract_list(tier)?;
                     for tracker in tier_list {
-                        trackers.push((index, TrackerAddr::try_from(tracker)?))
+                        trackers.push((index as u8, TrackerAddr::try_from(tracker)?))
                     }
                 }
                 trackers.into_boxed_slice()
@@ -259,14 +259,43 @@ impl<'b> TryFrom<&'b Bencoding> for Torrent {
         if piece_bytes_len % PIECE_HASH_SIZE != 0 {
             return Err(ParseTorrentError::BadHashLength(piece_bytes_len));
         }
-        let mut piece_hashes: Vec<PieceHash> =
-            Vec::with_capacity(piece_bytes_len / PIECE_HASH_SIZE);
+        let mut piece_hashes = Vec::with_capacity(piece_bytes_len / PIECE_HASH_SIZE);
         for chunk in piece_bytes.chunks_exact(PIECE_HASH_SIZE) {
             let mut arr: [u8; PIECE_HASH_SIZE] = Default::default();
             arr.copy_from_slice(chunk);
             piece_hashes.push(PieceHash(arr));
         }
-        unimplemented!()
+        let piece_hashes = piece_hashes.into_boxed_slice();
+        let files = match extract_key(info, b"files") {
+            Err(_) => {
+                let name: PathBuf = extract_string(extract_key(info, b"name")?)?.into();
+                let length = extract_int(extract_key(info, b"length")?)? as usize;
+                vec![FileInfo { name, length }].into_boxed_slice()
+            }
+            Ok(inner) => {
+                let dir: PathBuf = extract_string(extract_key(info, b"name")?)?.into();
+                let files = extract_list(inner)?;
+                let mut file_infos = Vec::with_capacity(files.len());
+                for file in files {
+                    let mut name = dir.clone();
+                    let length = extract_int(extract_key(file, b"length")?)? as usize;
+                    let path: PathBuf = extract_string(extract_key(file, b"path")?)?.into();
+                    name.push(path);
+                    file_infos.push(FileInfo { name, length });
+                }
+                file_infos.into_boxed_slice()
+            }
+        };
+        Ok(Torrent {
+            trackers,
+            creation,
+            comment,
+            created_by,
+            private,
+            piece_length,
+            piece_hashes,
+            files,
+        })
     }
 }
 
