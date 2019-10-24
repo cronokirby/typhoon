@@ -344,6 +344,18 @@ impl<'b> TryFrom<&'b Bencoding> for Torrent {
             Ok(piece_hashes.into_boxed_slice())
         }
 
+        fn extract_path_from_list<'b>(
+            bencoding: &'b Bencoding,
+            path: &mut PathBuf,
+        ) -> Result<(), ParseTorrentError<'b>> {
+            let list = extract_list(bencoding)?;
+            for el in list {
+                let path_part: PathBuf = extract_string(el)?.into();
+                path.push(path_part);
+            }
+            Ok(())
+        }
+
         fn extract_files(info: &Bencoding) -> Result<Box<[FileInfo]>, ParseTorrentError<'_>> {
             match extract_key(info, "files") {
                 Err(_) => {
@@ -358,8 +370,8 @@ impl<'b> TryFrom<&'b Bencoding> for Torrent {
                     for file in files {
                         let mut name = dir.clone();
                         let length = extract_int(extract_key(file, "length")?)? as usize;
-                        let path: PathBuf = extract_string(extract_key(file, "path")?)?.into();
-                        name.push(path);
+                        let path_list = extract_key(file, "path")?;
+                        extract_path_from_list(path_list, &mut name)?;
                         file_infos.push(FileInfo { name, length });
                     }
                     Ok(file_infos.into_boxed_slice())
