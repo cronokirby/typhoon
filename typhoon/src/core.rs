@@ -3,27 +3,86 @@
 //! This includes definitions of things like piece hashes, peers, as well
 //! as what's included in a `.torrent` file, for example.
 use crate::bencoding::Bencoding;
-use std::{convert::TryFrom, path::PathBuf, str, time};
+use std::{convert::TryFrom, error, fmt, path::PathBuf, str, time};
 
+/// An error occurring when extracting a value from bencoding.
+#[derive(Clone, Debug, PartialEq)]
 pub enum TryFromBencodingError<'b> {
+    /// We tried to get an int, but the bencoding wasn't an integer.
+    ///
+    /// This branch contains the bencoding that failed our match.
     ExpectedInt(&'b Bencoding),
+    /// We tried to get a string, but the bencoding wasn't a string.
+    ///
+    /// This branch contains the bencoding that failed our match.
     ExpectedByteString(&'b Bencoding),
+    /// We tried to get a list, but the bencoding wasn't a list.
+    ///
+    /// This branch contains the bencoding that failed our match.
     ExpectedList(&'b Bencoding),
+    /// We tried to get a dictionary, but the bencoding wasn't a dictionary.
+    ///
+    /// This branch contains the bencoding that failed our match.
     ExpectedDict(&'b Bencoding),
+    /// We tried to interpret an integer as a UNIX timestamp, but it was too large.
+    ///
+    /// This branch contains the integer that was too large.
     ExceedsSystemTime(i64),
+    /// We tried to parse a byte string as a UTF8 string, but the bytes weren't valid.
     NotUTF8 {
+        /// The bencoding byte string that wasn't valid UTF8
         bencoding: &'b Bencoding,
+        /// An error with more information about how the bytes weren't valid
         error: str::Utf8Error,
     },
+    /// We tried to get a key from a bencoding dictionary, but the key wasn't present.
     MissingKey {
+        /// The bencoding dictionary missing a key
         bencoding: &'b Bencoding,
-        key: &'static [u8],
+        /// The key we tried to retrieve
+        ///
+        /// The only keys we're interested in retrieving are valid UTF8 strings, which is why
+        /// this type isn't `&'static [u8]` instead.
+        key: &'static str,
     },
 }
 
 impl<'b> TryFromBencodingError<'b> {
     fn from_utf8_error(bencoding: &'b Bencoding, error: str::Utf8Error) -> Self {
         TryFromBencodingError::NotUTF8 { bencoding, error }
+    }
+}
+
+impl<'b> fmt::Display for TryFromBencodingError<'b> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use TryFromBencodingError::*;
+        match self {
+            ExpectedInt(incorrect) => write!(f, "bencoding {} is not an integer", incorrect),
+            ExpectedByteString(incorrect) => write!(f, "bencoding {} is not a string", incorrect),
+            ExpectedList(incorrect) => write!(f, "bencoding {} is not a list", incorrect),
+            ExpectedDict(incorrect) => write!(f, "bencoding {} is not a dictionary", incorrect),
+            ExceedsSystemTime(big) => write!(f, "integer {} exceeds UNIX time bounds", big),
+            NotUTF8 { bencoding, error } => write!(
+                f,
+                "bencoding {} is not valid UTF8 because: {}",
+                bencoding, error
+            ),
+            MissingKey { bencoding, key } => write!(
+                f,
+                "bencoding {} does not contain the key {}",
+                bencoding, key
+            ),
+        }
+    }
+}
+
+impl<'b> error::Error for TryFromBencodingError<'b> {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        if let TryFromBencodingError::NotUTF8 { error, .. } = self {
+            Some(error)
+        } else {
+            None
+        }
     }
 }
 
@@ -52,11 +111,11 @@ fn extract_string<'b>(bencoding: &'b Bencoding) -> Result<&'b str, TryFromBencod
 #[inline]
 fn extract_key<'b>(
     bencoding: &'b Bencoding,
-    key: &'static [u8],
+    key: &'static str,
 ) -> Result<&'b Bencoding, TryFromBencodingError<'b>> {
     match bencoding {
         Bencoding::Dict(map) => map
-            .get(key)
+            .get(key.as_bytes())
             .ok_or(TryFromBencodingError::MissingKey { bencoding, key }),
         _ => Err(TryFromBencodingError::ExpectedDict(bencoding)),
     }
@@ -203,8 +262,21 @@ pub struct Torrent {
     pub files: Box<[FileInfo]>,
 }
 
+/// An error that can occurr when parsing a torrent file.
+///
+/// One big source of these is the bencoding not matching up with our expectations.
+/// For example, we expect an initial dictionary with quite a few keys. If any of those
+/// keys are missing, or the bencoding isn't a dictionary, we have to generate one of
+/// these errors.
+#[derive(Clone, Debug, PartialEq)]
 pub enum ParseTorrentError<'b> {
+    /// The bencoding didn't match the shape of a torrent file.
     Bencoding(TryFromBencodingError<'b>),
+    /// The length of the concatenated piece hashes was not a multiple of 20.
+    ///
+    /// A torrent file contains a big byte string, with the hash of each piece one
+    /// after the other. Each hash is the SHA1 hash of the nth piece. SHA1 hashes are 20 bytes long.
+    /// If this byte string is not a multiple of 20, then it can't be a concatenation of N hashes.
     BadHashLength(usize),
 }
 
@@ -214,6 +286,18 @@ impl<'b> From<TryFromBencodingError<'b>> for ParseTorrentError<'b> {
     }
 }
 
+impl<'b> fmt::Display for ParseTorrentError<'b> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use ParseTorrentError::*;
+        match self {
+            Bencoding(err) => write!(f, "{}", err),
+            BadHashLength(size) => write!(f, "hash length {} is not a multiple of 20", size),
+        }
+    }
+}
+
+impl<'b> error::Error for ParseTorrentError<'b> {}
+
 impl<'b> TryFrom<&'b Bencoding> for Torrent {
     type Error = ParseTorrentError<'b>;
 
@@ -221,7 +305,7 @@ impl<'b> TryFrom<&'b Bencoding> for Torrent {
         fn extract_trackers(
             bencoding: &Bencoding,
         ) -> Result<Box<[(u8, TrackerAddr)]>, ParseTorrentError<'_>> {
-            match extract_key(bencoding, b"announce-list") {
+            match extract_key(bencoding, "announce-list") {
                 Err(_) => {
                     let tracker = TrackerAddr::try_from(bencoding)?;
                     Ok(vec![(0, tracker)].into_boxed_slice())
@@ -243,7 +327,7 @@ impl<'b> TryFrom<&'b Bencoding> for Torrent {
         fn extract_piece_hashes(
             info: &Bencoding,
         ) -> Result<Box<[PieceHash]>, ParseTorrentError<'_>> {
-            let piece_bytes = extract_bytes(extract_key(info, b"pieces")?)?;
+            let piece_bytes = extract_bytes(extract_key(info, "pieces")?)?;
             let piece_bytes_len = piece_bytes.len();
             if piece_bytes_len % PIECE_HASH_SIZE != 0 {
                 return Err(ParseTorrentError::BadHashLength(piece_bytes_len));
@@ -258,20 +342,20 @@ impl<'b> TryFrom<&'b Bencoding> for Torrent {
         }
 
         fn extract_files(info: &Bencoding) -> Result<Box<[FileInfo]>, ParseTorrentError<'_>> {
-            match extract_key(info, b"files") {
+            match extract_key(info, "files") {
                 Err(_) => {
-                    let name: PathBuf = extract_string(extract_key(info, b"name")?)?.into();
-                    let length = extract_int(extract_key(info, b"length")?)? as usize;
+                    let name: PathBuf = extract_string(extract_key(info, "name")?)?.into();
+                    let length = extract_int(extract_key(info, "length")?)? as usize;
                     Ok(vec![FileInfo { name, length }].into_boxed_slice())
                 }
                 Ok(inner) => {
-                    let dir: PathBuf = extract_string(extract_key(info, b"name")?)?.into();
+                    let dir: PathBuf = extract_string(extract_key(info, "name")?)?.into();
                     let files = extract_list(inner)?;
                     let mut file_infos = Vec::with_capacity(files.len());
                     for file in files {
                         let mut name = dir.clone();
-                        let length = extract_int(extract_key(file, b"length")?)? as usize;
-                        let path: PathBuf = extract_string(extract_key(file, b"path")?)?.into();
+                        let length = extract_int(extract_key(file, "length")?)? as usize;
+                        let path: PathBuf = extract_string(extract_key(file, "path")?)?.into();
                         name.push(path);
                         file_infos.push(FileInfo { name, length });
                     }
@@ -281,25 +365,25 @@ impl<'b> TryFrom<&'b Bencoding> for Torrent {
         }
 
         let trackers = extract_trackers(bencoding)?;
-        let creation = extract_key(bencoding, b"creation date")
+        let creation = extract_key(bencoding, "creation date")
             .ok()
             .map(extract_system_time)
             .transpose()?;
-        let comment = extract_key(bencoding, b"comment")
+        let comment = extract_key(bencoding, "comment")
             .ok()
             .map(|inner| extract_string(inner).map(String::from))
             .transpose()?;
-        let created_by = extract_key(bencoding, b"created by")
+        let created_by = extract_key(bencoding, "created by")
             .ok()
             .map(|inner| extract_string(inner).map(String::from))
             .transpose()?;
-        let info = extract_key(bencoding, b"info")?;
-        let private_option = extract_key(info, b"private")
+        let info = extract_key(bencoding, "info")?;
+        let private_option = extract_key(info, "private")
             .ok()
             .map(extract_int)
             .transpose()?;
         let private = private_option.map(|x| x == 1).unwrap_or(false);
-        let piece_length = extract_int(extract_key(info, b"piece length")?)? as usize;
+        let piece_length = extract_int(extract_key(info, "piece length")?)? as usize;
         let piece_hashes = extract_piece_hashes(info)?;
         let files = extract_files(info)?;
         Ok(Torrent {
