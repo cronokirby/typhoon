@@ -198,6 +198,7 @@ const PIECE_HASH_SIZE: usize = 20;
 /// This is how we verify the integrity of the data we receive from a torrent.
 /// For each piece, we can calculate the SHA1 hash of that piece, and compare that
 /// to the information we know about that torrent.
+#[derive(Clone, Debug, PartialEq)]
 pub struct PieceHash([u8; PIECE_HASH_SIZE]);
 
 /// This contains the info about a specific file in this torrent.
@@ -207,6 +208,7 @@ pub struct PieceHash([u8; PIECE_HASH_SIZE]);
 /// For example, a movie might have a main file `movie.mp4` as well as subtitles
 /// `subtitles/it.srt`, `subtitles/en.srt`. The video file will be quite a bit larger than
 /// the subtitles, of course.
+#[derive(Clone, Debug, PartialEq)]
 pub struct FileInfo {
     /// This holds the path of the file.
     pub name: PathBuf,
@@ -219,6 +221,7 @@ pub struct FileInfo {
 /// This includes information about the files contained in a torrent, including
 /// how they're divided up into pieces, as well as how to connect to an existing
 /// swarm for this torrent.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Torrent {
     /// A list of trackers we can connect to, with different priorities.
     ///
